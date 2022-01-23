@@ -377,6 +377,7 @@ contract LiquidationOperator is IUniswapV2Callee {
             DataTypes.ReserveData memory reserve = pool.getReserveData(
                 reserves[i]
             );
+
             // if use as debt.
             if (userConfig.isBorrowing(reserve.id)) {
                 uint256 stableDebt = IERC20(reserve.stableDebtTokenAddress)
@@ -385,11 +386,15 @@ contract LiquidationOperator is IUniswapV2Callee {
                     .balanceOf(user);
                 string memory symbol = IERC20(reserves[i]).symbol();
                 uint256 decimals = IERC20(reserves[i]).decimals();
+                uint256 priceInEth = IPriceOracleGetter(PRICE_ORACLE)
+                    .getAssetPrice(reserves[i]);
                 console.log(
-                    "user debt %s: stableDebt %s, variableDebt %s",
+                    "user debt %s: %s, in eth: %s",
                     symbol,
-                    stableDebt / 10**decimals,
-                    variableDebt / 10**decimals
+                    (stableDebt + variableDebt) / 10**decimals,
+                    ((stableDebt + variableDebt) * priceInEth) /
+                        10**decimals /
+                        1e18
                 );
             }
             // if use as collateral.
@@ -399,10 +404,13 @@ contract LiquidationOperator is IUniswapV2Callee {
                 );
                 string memory symbol = IERC20(reserves[i]).symbol();
                 uint256 decimals = IERC20(reserves[i]).decimals();
+                uint256 priceInEth = IPriceOracleGetter(PRICE_ORACLE)
+                    .getAssetPrice(reserves[i]);
                 console.log(
-                    "user collateral %s: %s",
+                    "user collateral %s: %s, in eth: %s",
                     symbol,
-                    collateral / 10**decimals
+                    collateral / 10**decimals,
+                    (collateral * priceInEth) / 10**decimals / 1e18
                 );
             }
             // skip.
@@ -551,7 +559,7 @@ contract LiquidationOperator is IUniswapV2Callee {
             .getUserAccountData(USER);
         require(healthFactor < 1e18, "user cannot be liquidated.");
         // Print user position to get necessary information.
-        // _printUserPosition(USER);
+        _printUserPosition(USER);
 
         uint256 debtUsdt = _getUserDebt(USER, USDT);
         uint256 collateralWbtc = _getUserCollateral(USER, WBTC);
