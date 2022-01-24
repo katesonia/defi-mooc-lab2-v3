@@ -551,6 +551,41 @@ contract LiquidationOperator is IUniswapV2Callee {
     // TODO: add a `receive` function so that you can withdraw your WETH
     receive() external payable {}
 
+    // Repay as much as possible and turn profit to WETH.
+    function maxOutLiq(
+        address user,
+        address debtToken,
+        address collateralToken
+    ) private {
+        uint256 debtUsdt = _getUserDebt(user, debtToken);
+        uint256 collateralWbtc = _getUserCollateral(user, collateralToken);
+        uint256 wbtcLiquidationBonus = _getLiquidationBonus(collateralToken);
+        uint256 maxCollateralWbtc;
+        uint256 maxRepayUsdt;
+        // Get maximum collateral to liquidate and the corresponding debt repayment.
+        (maxCollateralWbtc, maxRepayUsdt) = _maxLiquidation(
+            debtToken,
+            collateralToken,
+            debtUsdt,
+            collateralWbtc,
+            wbtcLiquidationBonus
+        );
+        // How much eth we can get out if we return the max amount of collateralToken collateral from liquidation.
+        uint256 ethToBorrow = _getAmountOut(
+            maxCollateralWbtc,
+            collateralToken,
+            WETH
+        );
+        IUniswapV2Pair(
+            IUniswapV2Factory(UNI_FACTORY).getPair(collateralToken, WETH)
+        ).swap(
+                uint256(0),
+                ethToBorrow,
+                address(this),
+                abi.encode(maxRepayUsdt, debtToken, collateralToken)
+            );
+    }
+
     // END TODO
 
     // required by the testing script, entry for your liquidation call
@@ -565,33 +600,12 @@ contract LiquidationOperator is IUniswapV2Callee {
         // Print user position to get necessary information.
         _printUserPosition(USER);
 
-        uint256 debtUsdt = _getUserDebt(USER, USDT);
-        uint256 collateralWbtc = _getUserCollateral(USER, WBTC);
-        uint256 wbtcLiquidationBonus = _getLiquidationBonus(WBTC);
-        uint256 maxCollateralWbtc;
-        uint256 maxRepayUsdt;
-        // Get maximum collateral to liquidate and the corresponding debt repayment.
-        (maxCollateralWbtc, maxRepayUsdt) = _maxLiquidation(
-            USDT,
-            WBTC,
-            debtUsdt,
-            collateralWbtc,
-            wbtcLiquidationBonus
-        );
         // 2. call flash swap to liquidate the target user
         // based on https://etherscan.io/tx/0xac7df37a43fab1b130318bbb761861b8357650db2e2c6493b73d6da3d9581077
         // we know that the target user borrowed USDT with WBTC as collateral
         // we should borrow USDT, liquidate the target user and get the WBTC, then swap WBTC to repay uniswap
         // (please feel free to develop other workflows as long as they liquidate the target user successfully)
-
-        // How much eth we can get out if we return the max amount of WBTC collateral from liquidation.
-        uint256 ethToBorrow = _getAmountOut(maxCollateralWbtc, WBTC, WETH);
-        IUniswapV2Pair(IUniswapV2Factory(UNI_FACTORY).getPair(WBTC, WETH)).swap(
-                uint256(0),
-                ethToBorrow,
-                address(this),
-                abi.encode(maxRepayUsdt)
-            );
+        maxOutLiq(USER, USDT, WBTC);
 
         // 3. Convert the profit into ETH and send back to sender
         uint256 profitWeth = IERC20(WETH).balanceOf(address(this));
@@ -618,28 +632,37 @@ contract LiquidationOperator is IUniswapV2Callee {
                 wethAmount > 0,
             "failed to borrow tokens!"
         );
-        uint256 usdtToRepay = abi.decode(data, (uint256));
+        uint256 repayAmount;
+        address debtToken;
+        address collateralToken;
+        (repayAmount, debtToken, collateralToken) = abi.decode(
+            data,
+            (uint256, address, address)
+        );
         // +1 in case of decimal round up issue.
-        uint256 wethToSwapUsdt = _getAmountIn(usdtToRepay + 1, WETH, USDT);
-        _swap(wethToSwapUsdt, WETH, USDT);
+        repayAmount = repayAmount + 1;
+        if (debtToken != WETH) {
+            uint256 wethToSwap = _getAmountIn(repayAmount, WETH, debtToken);
+            _swap(wethToSwap, WETH, debtToken);
+        }
         // 2.1 liquidate the target user
-        IERC20(USDT).approve(AAVE_LENDING_POOL, type(uint256).max);
+        IERC20(debtToken).approve(AAVE_LENDING_POOL, repayAmount);
         ILendingPool(AAVE_LENDING_POOL).liquidationCall(
-            WBTC,
-            USDT,
+            collateralToken,
+            debtToken,
             USER,
-            type(uint256).max,
+            repayAmount,
             false
         );
         // 2.2 swap WBTC for other things or repay directly
-        uint256 btcProfit = IERC20(WBTC).balanceOf(address(this));
+        uint256 profit = IERC20(collateralToken).balanceOf(address(this));
         // 2.3 repay
-        address wbtcWethPair = IUniswapV2Factory(UNI_FACTORY).getPair(
-            WBTC,
+        address pair = IUniswapV2Factory(UNI_FACTORY).getPair(
+            collateralToken,
             WETH
         );
         require(
-            IERC20(WBTC).transfer(wbtcWethPair, btcProfit),
+            IERC20(collateralToken).transfer(pair, profit),
             "Failed to transfer!"
         );
         // END TODO
