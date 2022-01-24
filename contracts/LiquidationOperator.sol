@@ -624,6 +624,7 @@ contract LiquidationOperator is IUniswapV2Callee {
         uint256 liqThreshold,
         uint256 liqBonus
     ) private pure returns (uint256) {
+        // Target health factor that is close but less than 1.
         uint256 targetHealthFactor = 998999999999999999;
         uint256 numerator = targetHealthFactor *
             totalDebtInEth -
