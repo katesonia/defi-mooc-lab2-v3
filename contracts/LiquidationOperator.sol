@@ -557,22 +557,22 @@ contract LiquidationOperator is IUniswapV2Callee {
         address debtToken,
         address collateralToken
     ) private {
-        uint256 debtUsdt = _getUserDebt(user, debtToken);
-        uint256 collateralWbtc = _getUserCollateral(user, collateralToken);
-        uint256 wbtcLiquidationBonus = _getLiquidationBonus(collateralToken);
-        uint256 maxCollateralWbtc;
-        uint256 maxRepayUsdt;
+        uint256 debt = _getUserDebt(user, debtToken);
+        uint256 collateral = _getUserCollateral(user, collateralToken);
+        uint256 liqBonus = _getLiquidationBonus(collateralToken);
+        uint256 maxLiqCollateral;
+        uint256 maxRepay;
         // Get maximum collateral to liquidate and the corresponding debt repayment.
-        (maxCollateralWbtc, maxRepayUsdt) = _maxLiquidation(
+        (maxLiqCollateral, maxRepay) = _maxLiquidation(
             debtToken,
             collateralToken,
-            debtUsdt,
-            collateralWbtc,
-            wbtcLiquidationBonus
+            debt,
+            collateral,
+            liqBonus
         );
         // How much eth we can get out if we return the max amount of collateralToken collateral from liquidation.
-        uint256 ethToBorrow = _getAmountOut(
-            maxCollateralWbtc,
+        uint256 wethToBorrow = _getAmountOut(
+            maxLiqCollateral,
             collateralToken,
             WETH
         );
@@ -580,11 +580,17 @@ contract LiquidationOperator is IUniswapV2Callee {
             IUniswapV2Factory(UNI_FACTORY).getPair(collateralToken, WETH)
         ).swap(
                 uint256(0),
-                ethToBorrow,
+                wethToBorrow,
                 address(this),
-                abi.encode(maxRepayUsdt, debtToken, collateralToken)
+                abi.encode(maxRepay, debtToken, collateralToken)
             );
     }
+
+    function firstProbLiq(
+        address user,
+        address debtToken,
+        address collateralToken
+    ) private {}
 
     // END TODO
 
@@ -605,6 +611,7 @@ contract LiquidationOperator is IUniswapV2Callee {
         // we know that the target user borrowed USDT with WBTC as collateral
         // we should borrow USDT, liquidate the target user and get the WBTC, then swap WBTC to repay uniswap
         // (please feel free to develop other workflows as long as they liquidate the target user successfully)
+        firstProbLiq(USER, USDT, WBTC);
         maxOutLiq(USER, USDT, WBTC);
 
         // 3. Convert the profit into ETH and send back to sender
