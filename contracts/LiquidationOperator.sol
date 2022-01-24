@@ -468,7 +468,7 @@ contract LiquidationOperator is IUniswapV2Callee {
     }
 
     function _getAmountIn(
-        uint256 amountIn,
+        uint256 amountOut,
         address tokenIn,
         address tokenOut
     ) private view returns (uint256) {
@@ -486,7 +486,11 @@ contract LiquidationOperator is IUniswapV2Callee {
         (reserveIn, reserveOut) = tokenIn < tokenOut
             ? (reserve1, reserve2)
             : (reserve2, reserve1);
-        return getAmountIn(amountIn, reserveIn, reserveOut);
+        require(
+            reserveOut > amountOut,
+            "Not enough reserve for the amount out!"
+        );
+        return getAmountIn(amountOut, reserveIn, reserveOut);
     }
 
     function _getAmountOut(
