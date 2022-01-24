@@ -277,10 +277,12 @@ contract LiquidationOperator is IUniswapV2Callee {
     address private AAVE_LENDING_POOL =
         0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9;
     address private UNI_FACTORY = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
-    // WBTC < WETH < USDT
+    // WBTC < LINK < WETH < USDT
     address private USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
     address private WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address private WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+    address private LINK = 0x514910771AF9Ca656af840dff83E8264EcF986CA;
+    address private USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address private PRICE_ORACLE = 0xA50ba011c48153De246E5192C8f9258A2ba79Ca9;
     // decimals for percentage close factor is 4.
     uint256 private CLOSE_FACTOR = 5000;
@@ -389,7 +391,7 @@ contract LiquidationOperator is IUniswapV2Callee {
                 uint256 priceInEth = IPriceOracleGetter(PRICE_ORACLE)
                     .getAssetPrice(reserves[i]);
                 console.log(
-                    "user debt %s: %s, in eth: %s",
+                    "debt %s: %s, in eth: %s",
                     symbol,
                     (stableDebt + variableDebt) / 10**decimals,
                     ((stableDebt + variableDebt) * priceInEth) /
@@ -407,7 +409,7 @@ contract LiquidationOperator is IUniswapV2Callee {
                 uint256 priceInEth = IPriceOracleGetter(PRICE_ORACLE)
                     .getAssetPrice(reserves[i]);
                 console.log(
-                    "user collateral %s: %s, in eth: %s",
+                    "collateral %s: %s, in eth: %s",
                     symbol,
                     collateral / 10**decimals,
                     (collateral * priceInEth) / 10**decimals / 1e18
@@ -415,6 +417,7 @@ contract LiquidationOperator is IUniswapV2Callee {
             }
             // skip.
         }
+        console.log("\n");
     }
 
     // Get the maximum amount of collateral we can liquidate and the corresponding debt repayment.
@@ -526,6 +529,10 @@ contract LiquidationOperator is IUniswapV2Callee {
             tokenOut
         );
         require(
+            IERC20(tokenIn).balanceOf(address(this)) >= amountIn,
+            "not enough balance to swap!"
+        );
+        require(
             IERC20(tokenIn).transfer(pair, amountIn),
             "Failed to transfer!"
         );
@@ -551,6 +558,33 @@ contract LiquidationOperator is IUniswapV2Callee {
     // TODO: add a `receive` function so that you can withdraw your WETH
     receive() external payable {}
 
+    function _borrowFlashLoanAndReturn(
+        address debtToken,
+        uint256 repayAmount,
+        address collateralToken,
+        uint256 collateralAmount
+    ) private {
+        uint256 wethToBorrow = _getAmountOut(
+            collateralAmount,
+            collateralToken,
+            WETH
+        );
+        console.log(
+            "Estimate to get %s collateral %s liquidated",
+            collateralAmount / 10**IERC20(collateralToken).decimals(),
+            IERC20(collateralToken).symbol()
+        );
+        console.log("Borrow out %s WETH frash loan", wethToBorrow / 1e18);
+        IUniswapV2Pair(
+            IUniswapV2Factory(UNI_FACTORY).getPair(collateralToken, WETH)
+        ).swap(
+                uint256(0),
+                wethToBorrow,
+                address(this),
+                abi.encode(repayAmount, debtToken, collateralToken)
+            );
+    }
+
     // Repay as much as possible and turn profit to WETH.
     function maxOutLiq(
         address user,
@@ -560,37 +594,83 @@ contract LiquidationOperator is IUniswapV2Callee {
         uint256 debt = _getUserDebt(user, debtToken);
         uint256 collateral = _getUserCollateral(user, collateralToken);
         uint256 liqBonus = _getLiquidationBonus(collateralToken);
-        uint256 maxLiqCollateral;
-        uint256 maxRepay;
+        uint256 liqCollateralAmount;
+        uint256 repayAmount;
         // Get maximum collateral to liquidate and the corresponding debt repayment.
-        (maxLiqCollateral, maxRepay) = _maxLiquidation(
+        (liqCollateralAmount, repayAmount) = _maxLiquidation(
             debtToken,
             collateralToken,
             debt,
             collateral,
             liqBonus
         );
-        // How much eth we can get out if we return the max amount of collateralToken collateral from liquidation.
-        uint256 wethToBorrow = _getAmountOut(
-            maxLiqCollateral,
-            collateralToken,
-            WETH
+        console.log(
+            "Repay amount %s, collateral to liquidate %s",
+            repayAmount / IERC20(debtToken).decimals(),
+            liqCollateralAmount / IERC20(collateralToken).decimals()
         );
-        IUniswapV2Pair(
-            IUniswapV2Factory(UNI_FACTORY).getPair(collateralToken, WETH)
-        ).swap(
-                uint256(0),
-                wethToBorrow,
-                address(this),
-                abi.encode(maxRepay, debtToken, collateralToken)
-            );
+        // How much eth we can get out if we return the max amount of collateralToken collateral from liquidation.
+        _borrowFlashLoanAndReturn(
+            debtToken,
+            repayAmount,
+            collateralToken,
+            liqCollateralAmount
+        );
+    }
+
+    function _getMaxRepayInEthForTargetHealthFactor(
+        uint256 totalDebtInEth,
+        uint256 totalCollateralInEth,
+        uint256 liqThreshold,
+        uint256 liqBonus
+    ) private pure returns (uint256) {
+        uint256 targetHealthFactor = 998999999999999999;
+        uint256 numerator = targetHealthFactor *
+            totalDebtInEth -
+            1e14 *
+            totalCollateralInEth *
+            liqThreshold;
+        uint256 denominator = targetHealthFactor -
+            1e10 *
+            liqBonus *
+            liqThreshold;
+        return numerator / denominator;
     }
 
     function firstProbLiq(
-        address user,
         address debtToken,
-        address collateralToken
-    ) private {}
+        address collateralToken,
+        uint256 totalDebtInEth,
+        uint256 totalCollateralInEth,
+        uint256 liqThreshold
+    ) private {
+        uint256 liqBonus = _getLiquidationBonus(collateralToken);
+        uint256 repayInEth = _getMaxRepayInEthForTargetHealthFactor(
+            totalDebtInEth,
+            totalCollateralInEth,
+            liqThreshold,
+            liqBonus
+        );
+        IPriceOracleGetter oracle = IPriceOracleGetter(PRICE_ORACLE);
+        uint256 repayAmount = (repayInEth * 10**IERC20(debtToken).decimals()) /
+            oracle.getAssetPrice(debtToken);
+        uint256 collateralAmount = (((repayInEth * liqBonus) / 1e4) *
+            10**IERC20(collateralToken).decimals()) /
+            oracle.getAssetPrice(collateralToken);
+
+        console.log(
+            "Repay amount %s, collateral to liquidate %s",
+            repayAmount / 10**IERC20(debtToken).decimals(),
+            collateralAmount / 10**IERC20(collateralToken).decimals()
+        );
+        // How much eth we can get out if we return the max amount of collateralToken collateral from liquidation.
+        _borrowFlashLoanAndReturn(
+            debtToken,
+            repayAmount,
+            collateralToken,
+            collateralAmount
+        );
+    }
 
     // END TODO
 
@@ -598,12 +678,23 @@ contract LiquidationOperator is IUniswapV2Callee {
     function operate() external {
         // TODO: implement your liquidation logic
         // 0. security checks and initializing variables
+        uint256 totalDebtInEth;
+        uint256 totalCollateralInEth;
+        uint256 liqThreshold;
         uint256 healthFactor;
         // 1. get the target user account data & make sure it is liquidatable
-        (, , , , , healthFactor) = ILendingPool(AAVE_LENDING_POOL)
-            .getUserAccountData(USER);
+        (
+            totalCollateralInEth,
+            totalDebtInEth,
+            ,
+            liqThreshold, // 4 decimals
+            ,
+            healthFactor // 18 decimals
+        ) = ILendingPool(AAVE_LENDING_POOL).getUserAccountData(USER);
+
         require(healthFactor < 1e18, "user cannot be liquidated.");
         // Print user position to get necessary information.
+        console.log("User AAVE debt/collateral positions:");
         _printUserPosition(USER);
 
         // 2. call flash swap to liquidate the target user
@@ -611,7 +702,36 @@ contract LiquidationOperator is IUniswapV2Callee {
         // we know that the target user borrowed USDT with WBTC as collateral
         // we should borrow USDT, liquidate the target user and get the WBTC, then swap WBTC to repay uniswap
         // (please feel free to develop other workflows as long as they liquidate the target user successfully)
-        firstProbLiq(USER, USDT, WBTC);
+        // First liquidation, liquidate as much as possible without making health factor > 1.
+        console.log(
+            "health factor: %s\n******* 1st Liquidation *******",
+            healthFactor
+        );
+        console.log(
+            "Fist prob liquidation strategy with USDC debt, LINK collateral"
+        );
+        firstProbLiq(
+            USDC,
+            LINK,
+            totalDebtInEth,
+            totalCollateralInEth,
+            liqThreshold
+        );
+
+        // Second liquidation, liquidate as much as possible.
+        (, , , , , healthFactor) = ILendingPool(AAVE_LENDING_POOL)
+            .getUserAccountData(USER);
+        console.log(
+            "health factor: %s\n******* 2nd Liquidation *******",
+            healthFactor
+        );
+        require(
+            healthFactor < 1e18,
+            "health factor has to be below 1 to continue liquidation!"
+        );
+        console.log(
+            "Max out liquidation strategy with USDT debt, WBTC collateral"
+        );
         maxOutLiq(USER, USDT, WBTC);
 
         // 3. Convert the profit into ETH and send back to sender
@@ -635,7 +755,7 @@ contract LiquidationOperator is IUniswapV2Callee {
         // 2.0. security checks and initializing variables
         uint256 wethAmount = amount1;
         require(
-            IERC20(WETH).balanceOf(address(this)) == wethAmount &&
+            IERC20(WETH).balanceOf(address(this)) >= wethAmount &&
                 wethAmount > 0,
             "failed to borrow tokens!"
         );
@@ -648,10 +768,16 @@ contract LiquidationOperator is IUniswapV2Callee {
         );
         // +1 in case of decimal round up issue.
         repayAmount = repayAmount + 1;
-        if (debtToken != WETH) {
-            uint256 wethToSwap = _getAmountIn(repayAmount, WETH, debtToken);
-            _swap(wethToSwap, WETH, debtToken);
-        }
+
+        uint256 wethToSwap = _getAmountIn(repayAmount, WETH, debtToken);
+        console.log(
+            "Swap %s WETH to %s debtoken %s",
+            wethToSwap / 1e18,
+            repayAmount / 1e6,
+            IERC20(debtToken).symbol()
+        );
+        _swap(wethToSwap, WETH, debtToken);
+
         // 2.1 liquidate the target user
         IERC20(debtToken).approve(AAVE_LENDING_POOL, repayAmount);
         ILendingPool(AAVE_LENDING_POOL).liquidationCall(
@@ -663,6 +789,12 @@ contract LiquidationOperator is IUniswapV2Callee {
         );
         // 2.2 swap WBTC for other things or repay directly
         uint256 profit = IERC20(collateralToken).balanceOf(address(this));
+        console.log(
+            "Liquated %s %s tokens! Eth profit %s\n",
+            profit / 10**IERC20(collateralToken).decimals(),
+            IERC20(collateralToken).symbol(),
+            (wethAmount - wethToSwap) / 1e18
+        );
         // 2.3 repay
         address pair = IUniswapV2Factory(UNI_FACTORY).getPair(
             collateralToken,
